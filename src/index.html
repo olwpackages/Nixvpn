@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://flagcdn.com https://cdn-icons-png.flaticon.com data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none';" />
+    <title>NixVPN</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="window-shell">
+      <aside class="sidebar">
+        <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true">
+            <span class="brand-letter">N</span>
+          </div>
+          <span class="brand-name">NixVPN</span>
+        </div>
+        <nav class="tabs" aria-label="Main navigation"><span class="tab-indicator" aria-hidden="true"></span>
+          <button class="tab is-active" data-page="home"><img class="tab-icon-image" data-fallback="ri-map-pin-line" src="https://cdn-icons-png.flaticon.com/512/2985/2985121.png" alt="">Home</button>
+          <button class="tab" data-page="profiles"><img class="tab-icon-image" data-fallback="ri-user-line" src="https://cdn-icons-png.flaticon.com/512/1077/1077114.png" alt="">Profiles</button>
+          <button class="tab" data-page="logs"><img class="tab-icon-image" data-fallback="ri-task-line" src="https://cdn-icons-png.flaticon.com/512/17849/17849111.png" alt="">Logs</button>
+          <button class="tab" data-page="settings"><img class="tab-icon-image" data-fallback="ri-equalizer-3-line" src="https://cdn-icons-png.flaticon.com/512/70/70115.png" alt="">Settings</button>
+        </nav>
+      </aside>
+
+      <section class="content-shell">
+        <header class="titlebar">
+          <div><span class="eyebrow" id="page-eyebrow">Overview</span><h1 id="page-title">Home</h1></div>
+          <div class="window-actions"><button id="minimize-button" aria-label="Minimize"><span class="ri-subtract-line" aria-hidden="true"></span></button><button id="close-button" aria-label="Close"><span class="ri-close-line" aria-hidden="true"></span></button></div>
+        </header>
+
+        <div id="app-content" class="page-content"></div>
+      </section>
+    </main>
+
+    <dialog id="add-profile-dialog" class="modal">
+      <form method="dialog" id="add-profile-form">
+        <div class="modal-heading"><div><span class="eyebrow">Profiles</span><h2>Add subscription</h2></div><button type="button" class="icon-button" id="close-add-profile" aria-label="Close"><span class="ri-close-line" aria-hidden="true"></span></button></div>
+        <p class="modal-copy">Paste an HTTPS subscription URL or a supported share link.</p>
+        <label class="field-label" for="profile-url">Subscription link</label>
+        <input id="profile-url" class="text-input" type="url" placeholder="https://provider.example/subscription" required />
+        <p id="modal-error" class="form-error" hidden></p>
+        <div class="modal-actions"><button type="button" class="button secondary" id="cancel-add-profile">Cancel</button><button class="button primary" id="add-profile-button" value="default">Add profile</button></div>
+      </form>
+    </dialog>
+    <dialog id="rename-profile-dialog" class="modal">
+      <form method="dialog" id="rename-profile-form">
+        <div class="modal-heading"><div><span class="eyebrow">Profiles</span><h2>Rename profile</h2></div><button type="button" class="icon-button" id="close-rename-profile" aria-label="Close"><span class="ri-close-line" aria-hidden="true"></span></button></div>
+        <p class="modal-copy">Choose a name that will be kept when the subscription is updated.</p>
+        <label class="field-label" for="rename-profile-input">Profile name</label>
+        <input id="rename-profile-input" class="text-input" type="text" maxlength="80" required />
+        <p id="rename-profile-error" class="form-error" hidden></p>
+        <div class="modal-actions"><button type="button" class="button secondary" id="cancel-rename-profile">Cancel</button><button class="button primary" id="save-rename-profile" value="default">Save name</button></div>
+      </form>
+    </dialog>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

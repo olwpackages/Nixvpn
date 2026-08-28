@@ -1,0 +1,10 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=NixVPN
+Comment=VPN subscription client for NixOS
+Exec=nixvpn
+Icon=nixvpn
+Terminal=false
+Categories=Network;Utility;
+StartupWMClass=NixVPN

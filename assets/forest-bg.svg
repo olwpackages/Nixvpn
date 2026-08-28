@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 230" preserveAspectRatio="xMidYMid slice">
+  <rect width="1200" height="230" fill="#07120c"/>
+  <path d="M0 163 88 119l72 44 82-57 79 57 97-70 86 70 94-52 91 52 87-67 93 67 84-51 82 51 96-61 79 61v67H0z" fill="#0c2115" opacity=".9"/>
+  <path d="M0 183 53 139l48 44 57-68 55 68 67-52 53 52 75-86 58 86 73-61 57 61 78-75 56 75 75-58 58 58 71-81 61 81 70-55 63 55 75-70 74 70v47H0z" fill="#0a1b11"/>
+  <g fill="#06100a">
+    <path d="m52 218 0-61-25 0 30-44-17 0 29-42 29 42H81l30 44H86v61z"/>
+    <path d="m150 218 0-73-28 0 35-51-19 0 35-52 35 52h-19l35 51h-28v73z"/>
+    <path d="m292 218 0-62-25 0 30-44-17 0 29-43 29 43h-17l30 44h-25v62z"/>
+    <path d="m438 218 0-78-31 0 39-56-20 0 39-60 39 60h-20l39 56h-31v78z"/>
+    <path d="m600 218 0-64-27 0 33-48-18 0 33-50 33 50h-18l33 48h-27v64z"/>
+    <path d="m752 218 0-77-31 0 38-55-20 0 39-60 39 60h-20l38 55h-31v77z"/>
+    <path d="m914 218 0-63-26 0 32-47-17 0 32-49 32 49h-17l32 47h-26v63z"/>
+    <path d="m1050 218 0-74-29 0 36-51-19 0 36-54 36 54h-19l36 51h-29v74z"/>
+    <path d="m1160 218 0-61-25 0 30-44-17 0 29-42 29 42h-17l30 44h-25v61z"/>
+  </g>
+  <rect width="1200" height="230" fill="url(#shade)"/>
+  <defs>
+    <radialGradient id="shade" cx="52%" cy="42%" r="78%">
+      <stop offset="0" stop-color="#173a25" stop-opacity=".16"/>
+      <stop offset=".7" stop-color="#020805" stop-opacity=".32"/>
+      <stop offset="1" stop-color="#020805" stop-opacity=".72"/>
+    </radialGradient>
+  </defs>
+</svg>
