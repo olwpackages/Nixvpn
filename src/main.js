@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, net, session, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, net, session, clipboard, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const tcp = require('node:net');
@@ -24,10 +24,17 @@ let systemProxyBackup;
 let quitting = false;
 let shutdownPromise;
 let recoveryInProgress = false;
+let connectionOperation = Promise.resolve();
 const pingPortReservations = new Set();
 const pingCoreProcesses = new Set();
 const geoCountryCache = new Map();
 const compatibleSubscriptionUserAgent = 'Koala Clash/1.3.1';
+
+function serializeConnectionOperation(operation) {
+  const current = connectionOperation.then(operation, operation);
+  connectionOperation = current.catch(() => {});
+  return current;
+}
 
 if (isLinux) {
   app.commandLine.appendSwitch('disable-gpu');
@@ -116,6 +123,12 @@ function readableTitle(value) {
   return title.replace(/^['"]|['"]$/g, '').trim();
 }
 
+function normalizePing(value) {
+  if (value == null || value === '') return null;
+  const ping = Number(value);
+  return Number.isFinite(ping) && ping >= 0 ? ping : null;
+}
+
 function normalizeServer(server, profileSource = '') {
   const outbound = server.outbound || null;
   const host = server.host || server.server || server.ip || '';
@@ -131,7 +144,7 @@ function normalizeServer(server, profileSource = '') {
     port: Number(server.port || server.server_port) || 443,
     protocol: protocolName,
     country,
-    ping: server.ping ?? null,
+    ping: normalizePing(server.ping),
     pingSource: server.pingSource || null,
     source: server.source || profileSource,
     ...(outbound ? { outbound } : {})
@@ -246,11 +259,8 @@ function normalizeState(raw) {
       sourceURL,
       expiresAt: profile.expiresAt || null,
       updatedAt: profile.updatedAt || profile.addedAt || Date.now(),
-      servers: legacyServers.map((server) => ({
-        ...normalizeServer(server, sourceURL),
-        ping: null,
-        pingSource: null
-      })).filter((server) => server.host)
+      servers: legacyServers.map((server) => normalizeServer(server, sourceURL))
+        .filter((server) => server.host)
     };
   }).filter((profile) => profile.servers.length) : [];
   const uniqueProfiles = new Map();
@@ -265,10 +275,42 @@ function normalizeState(raw) {
 }
 
 function readState() {
+  const target = statePath();
+  let file;
   try {
-    const file = fs.readFileSync(statePath(), 'utf8');
-    return normalizeState(JSON.parse(file));
-  } catch {
+    file = fs.readFileSync(target, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return defaultState();
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(file);
+    if (parsed.profilesEncrypted) {
+      if (!safeStorage.isEncryptionAvailable()) {
+        const error = new Error('Encrypted profile storage is unavailable on this system');
+        error.code = 'NIXVPN_STORAGE_UNAVAILABLE';
+        throw error;
+      }
+      try {
+        const encrypted = Buffer.from(String(parsed.profilesEncrypted), 'base64');
+        parsed.profiles = JSON.parse(safeStorage.decryptString(encrypted));
+        delete parsed.profilesEncrypted;
+      } catch (error) {
+        const wrapped = new Error(`Could not decrypt saved profiles: ${error.message}`);
+        wrapped.code = 'NIXVPN_STORAGE_UNAVAILABLE';
+        throw wrapped;
+      }
+    }
+    return normalizeState(parsed);
+  } catch (error) {
+    if (error.code === 'NIXVPN_STORAGE_UNAVAILABLE') throw error;
+    const backup = `${target}.corrupt-${Date.now()}-${process.pid}`;
+    try {
+      fs.renameSync(target, backup);
+    } catch (backupError) {
+      throw new Error(`Could not preserve invalid state file: ${backupError.message}`);
+    }
+    console.error(`[state] Invalid state moved to ${backup}: ${error.message}`);
     return defaultState();
   }
 }
@@ -276,7 +318,21 @@ function readState() {
 function writeState() {
   const target = statePath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, JSON.stringify(state, null, 2), { mode: 0o600 });
+  const temporary = `${target}.tmp-${process.pid}`;
+  try {
+    const diskState = { ...state };
+    if (safeStorage.isEncryptionAvailable()) {
+      diskState.profilesEncrypted = safeStorage.encryptString(JSON.stringify(state.profiles)).toString('base64');
+      delete diskState.profiles;
+    } else {
+      console.warn('[state] OS secure storage is unavailable; profiles remain protected only by file permissions');
+    }
+    fs.writeFileSync(temporary, JSON.stringify(diskState, null, 2), { mode: 0o600 });
+    fs.renameSync(temporary, target);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
 }
 
 function log(level, message, detail = '') {
@@ -340,6 +396,10 @@ function decodeBase64(value) {
   }
 }
 
+function safeDecodeURIComponent(value) {
+  try { return decodeURIComponent(String(value || '')); } catch { return String(value || ''); }
+}
+
 function isProbablyBase64(value) {
   return value.length > 20 && /^[A-Za-z0-9+/=_-]+$/.test(value.replace(/\s/g, ''));
 }
@@ -368,9 +428,12 @@ const countryCodes = {
 };
 
 function countryFromName(name, host = '') {
-  const haystack = `${name} ${host}`.toLowerCase().replace(/[^a-zа-я0-9]+/g, ' ');
-  for (const [key, code] of Object.entries(countryCodes)) {
-    if (haystack.includes(key)) return code;
+  const haystack = `${name} ${host}`.toLowerCase().replace(/[^a-zа-я0-9]+/g, ' ').trim();
+  const paddedHaystack = ` ${haystack} `;
+  const entries = Object.entries(countryCodes).sort(([left], [right]) => right.length - left.length);
+  for (const [key, code] of entries) {
+    const normalizedKey = key.toLowerCase().replace(/[^a-zа-я0-9]+/g, ' ').trim();
+    if (normalizedKey && paddedHaystack.includes(` ${normalizedKey} `)) return code;
   }
   const tld = host.toLowerCase().split('.').pop();
   return /^[a-z]{2}$/.test(tld) && Object.values(countryCodes).includes(tld) ? tld : 'un';
@@ -402,11 +465,11 @@ function parseNode(value) {
   const scheme = url.protocol.replace(':', '').toLowerCase();
   const supported = {
     vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', ss: 'Shadowsocks',
-    hysteria2: 'Hysteria 2', hy2: 'Hysteria 2', tuic: 'TUIC', wireguard: 'WireGuard',
-    wg: 'WireGuard', socks: 'SOCKS', socks5: 'SOCKS', http: 'HTTP'
+    hysteria2: 'Hysteria 2', hy2: 'Hysteria 2', tuic: 'TUIC', socks: 'SOCKS',
+    socks5: 'SOCKS', http: 'HTTP'
   };
   if (!supported[scheme] || !url.hostname) return null;
-  const name = decodeURIComponent(url.hash.slice(1)) || url.hostname;
+  const name = safeDecodeURIComponent(url.hash.slice(1)) || url.hostname;
   return {
     id: randomUUID(), name, host: url.hostname, port: Number(url.port) || 443,
     protocol: supported[scheme], country: countryFromName(name, url.hostname),
@@ -420,25 +483,43 @@ function outboundFromObject(item) {
   const serverPort = Number(item?.server_port || item?.port) || 443;
   if (!server) return null;
   const tlsEnabled = item.tls && !['false', 'none', '0'].includes(String(item.tls).toLowerCase());
+  const insecureTLS = ['true', '1', 'yes'].includes(String(item['skip-cert-verify'] || '').toLowerCase());
+  const alpn = item.alpn ? (Array.isArray(item.alpn) ? item.alpn : String(item.alpn).split(',').map((value) => value.trim()).filter(Boolean)) : undefined;
+  const fingerprint = item['client-fingerprint'] || item.fingerprint;
   const tls = item.tls && typeof item.tls === 'object'
     ? { ...item.tls }
     : tlsEnabled
-      ? { enabled: true, server_name: item.sni || item.servername || server }
+      ? { enabled: true, server_name: item.sni || item.servername || server, ...(insecureTLS ? { insecure: true } : {}), ...(alpn?.length ? { alpn } : {}), ...(fingerprint ? { utls: { enabled: true, fingerprint } } : {}) }
       : undefined;
   const transport = item.transport && typeof item.transport === 'object'
     ? { ...item.transport }
     : String(item.network || '').toLowerCase() === 'ws'
       ? { type: 'ws', path: item.path || item['ws-opts']?.path || '/', headers: item.host ? { Host: item.host } : undefined }
+      : String(item.network || '').toLowerCase() === 'grpc'
+        ? { type: 'grpc', service_name: item.service_name || item.serviceName || item.servicename || item['grpc-service-name'] || '' }
       : undefined;
   const base = { tag: 'proxy', server, server_port: serverPort };
   if (scheme === 'vless' && item.uuid) return { ...base, type: 'vless', uuid: item.uuid, flow: item.flow || undefined, tls, transport };
   if (scheme === 'vmess' && item.uuid) return { ...base, type: 'vmess', uuid: item.uuid, security: item.security || item.cipher || 'auto', tls, transport };
   if (scheme === 'trojan' && item.password) return { ...base, type: 'trojan', password: item.password, tls };
-  if ((scheme === 'hysteria2' || scheme === 'hy2') && item.password) return { ...base, type: 'hysteria2', password: item.password, tls };
-  if (scheme === 'tuic' && item.uuid && item.password) return { ...base, type: 'tuic', uuid: item.uuid, password: item.password, tls, congestion_control: item.congestion_control || 'cubic' };
+  if ((scheme === 'hysteria2' || scheme === 'hy2') && item.password) return { ...base, type: 'hysteria2', password: item.password, tls, ...(item.obfs ? { obfs: { type: item.obfs, password: item['obfs-password'] || '' } } : {}) };
+  if (scheme === 'tuic' && item.uuid && item.password) return { ...base, type: 'tuic', uuid: item.uuid, password: item.password, tls, congestion_control: item.congestion_control || item['congestion-control'] || 'cubic' };
   if (scheme === 'ss' && (item.password || item.method || item.cipher)) return { ...base, type: 'shadowsocks', method: item.method || item.cipher, password: item.password || '' };
   if (scheme === 'socks' || scheme === 'socks5') return { ...base, type: 'socks', username: item.username || undefined, password: item.password || undefined };
   if (scheme === 'http') return { ...base, type: 'http', username: item.username || undefined, password: item.password || undefined };
+  if ((scheme === 'wireguard' || scheme === 'wg') && (item.local_address || item.address)
+      && item.private_key && (item.peer_public_key || item.public_key)) {
+    return {
+      ...base,
+      type: 'wireguard',
+      local_address: item.local_address || item.address,
+      private_key: item.private_key,
+      peer_public_key: item.peer_public_key || item.public_key,
+      ...(item.pre_shared_key ? { pre_shared_key: item.pre_shared_key } : {}),
+      ...(item.mtu ? { mtu: Number(item.mtu) || item.mtu } : {}),
+      ...(item.reserved ? { reserved: item.reserved } : {})
+    };
+  }
   return null;
 }
 
@@ -450,11 +531,13 @@ function parseJSON(text) {
       if (typeof item === 'string') return parseNode(item);
       if (!item || !item.server) return null;
       const outbound = outboundFromObject(item);
+      if (['wireguard', 'wg'].includes(String(item.type || '').toLowerCase()) && !outbound) return null;
+      const port = Number(item.server_port || item.port) || 443;
       return {
         id: randomUUID(), name: item.name || item.tag || item.server, host: item.server,
-        port: Number(item.port) || 443, protocol: item.type || 'Proxy',
+        port, protocol: item.type || 'Proxy',
         country: countryFromName(item.name || item.tag || '', item.server), ping: null,
-        source: `${item.type || 'proxy'}://${item.server}:${item.port || 443}`,
+        source: `${item.type || 'proxy'}://${item.server}:${port}`,
         ...(outbound ? { outbound } : {})
       };
     }).filter(Boolean);
@@ -473,19 +556,20 @@ function parseClashYAML(text) {
       continue;
     }
     if (!current) continue;
-    const field = line.match(/^\s*(type|server|port|uuid|password|username|cipher|tls|sni|servername|network|path)\s*:\s*(.+)$/i);
+    const field = line.match(/^\s*(type|server|server_port|port|uuid|password|username|cipher|method|tls|sni|servername|network|path|host|flow|service_name|serviceName|grpc-service-name|congestion_control|congestion-control|skip-cert-verify|client-fingerprint|alpn|obfs|obfs-password)\s*:\s*(.+)$/i);
     if (field) current[field[1].toLowerCase()] = clean(field[2]);
   }
   if (current?.server) entries.push(current);
   return entries.map((item) => {
     const outbound = outboundFromObject(item);
+    if (['wireguard', 'wg'].includes(String(item.type || '').toLowerCase()) && !outbound) return null;
     return {
-    id: randomUUID(), name: item.name || item.server, host: item.server, port: Number(item.port) || 443,
+    id: randomUUID(), name: item.name || item.server, host: item.server, port: Number(item.server_port || item.port) || 443,
     protocol: item.type || 'Proxy', country: countryFromName(item.name || '', item.server), ping: null,
-    source: `${String(item.type || 'socks').toLowerCase()}://${item.server}:${Number(item.port) || 443}`,
+    source: `${String(item.type || 'socks').toLowerCase()}://${item.server}:${Number(item.server_port || item.port) || 443}`,
     ...(outbound ? { outbound } : {})
     };
-  });
+  }).filter(Boolean);
 }
 
 function parseSubscription(text, fallbackURL) {
@@ -527,6 +611,34 @@ function parseSubscription(text, fallbackURL) {
   return [...unique.values()];
 }
 
+const maxSubscriptionBytes = 10 * 1024 * 1024;
+
+async function readResponseText(response) {
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > maxSubscriptionBytes) {
+    throw new Error('Subscription response is too large');
+  }
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maxSubscriptionBytes) throw new Error('Subscription response is too large');
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxSubscriptionBytes) {
+      await reader.cancel();
+      throw new Error('Subscription response is too large');
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 function fetchText(url, userAgent = 'NixVPN/0.1', includeHwid = false) {
   return new Promise(async (resolve, reject) => {
     const controller = new AbortController();
@@ -542,7 +654,7 @@ function fetchText(url, userAgent = 'NixVPN/0.1', includeHwid = false) {
         }
       });
       if (!response.ok) throw new Error(`Subscription returned HTTP ${response.status}`);
-      resolve({ text: await response.text(), headers: response.headers });
+      resolve({ text: await readResponseText(response), headers: response.headers });
     } catch (error) { reject(error); }
     finally { clearTimeout(timer); }
   });
@@ -812,18 +924,18 @@ function buildOutbound(server) {
     return outbound;
   }
   if (scheme === 'vless') {
-    const outbound = { type: 'vless', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, uuid: decodeURIComponent(url.username), flow: url.searchParams.get('flow') || undefined, tls: tlsOptions(url) };
+    const outbound = { type: 'vless', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, uuid: safeDecodeURIComponent(url.username), flow: url.searchParams.get('flow') || undefined, tls: tlsOptions(url) };
     const type = url.searchParams.get('type') || url.searchParams.get('network');
     if (type === 'ws') outbound.transport = { type: 'ws', path: url.searchParams.get('path') || '/', headers: url.searchParams.get('host') ? { Host: url.searchParams.get('host') } : undefined };
     if (type === 'grpc') outbound.transport = { type: 'grpc', service_name: url.searchParams.get('serviceName') || '' };
     return outbound;
   }
-  if (scheme === 'trojan') return { type: 'trojan', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, password: decodeURIComponent(url.username), tls: tlsOptions(url) };
-  if (scheme === 'hysteria2' || scheme === 'hy2') return { type: 'hysteria2', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, password: decodeURIComponent(url.username), tls: tlsOptions(url), obfs: url.searchParams.get('obfs') ? { type: url.searchParams.get('obfs'), password: url.searchParams.get('obfs-password') || '' } : undefined };
-  if (scheme === 'tuic') return { type: 'tuic', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, uuid: decodeURIComponent(url.username), password: decodeURIComponent(url.password), congestion_control: url.searchParams.get('congestion_control') || 'cubic', tls: tlsOptions(url) };
-  if (scheme === 'socks' || scheme === 'socks5' || scheme === 'http') return { type: scheme === 'http' ? 'http' : 'socks', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, username: decodeURIComponent(url.username) || undefined, password: decodeURIComponent(url.password) || undefined };
+  if (scheme === 'trojan') return { type: 'trojan', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, password: safeDecodeURIComponent(url.username), tls: tlsOptions(url) };
+  if (scheme === 'hysteria2' || scheme === 'hy2') return { type: 'hysteria2', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, password: safeDecodeURIComponent(url.username), tls: tlsOptions(url), obfs: url.searchParams.get('obfs') ? { type: url.searchParams.get('obfs'), password: url.searchParams.get('obfs-password') || '' } : undefined };
+  if (scheme === 'tuic') return { type: 'tuic', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, uuid: safeDecodeURIComponent(url.username), password: safeDecodeURIComponent(url.password), congestion_control: url.searchParams.get('congestion_control') || 'cubic', tls: tlsOptions(url) };
+  if (scheme === 'socks' || scheme === 'socks5' || scheme === 'http') return { type: scheme === 'http' ? 'http' : 'socks', tag: 'proxy', server: url.hostname, server_port: Number(url.port) || 443, username: safeDecodeURIComponent(url.username) || undefined, password: safeDecodeURIComponent(url.password) || undefined };
   if (scheme === 'ss') {
-    let method = decodeURIComponent(url.username); let password = decodeURIComponent(url.password);
+    let method = safeDecodeURIComponent(url.username); let password = safeDecodeURIComponent(url.password);
     if (!password) {
       const decoded = decodeBase64(url.username);
       if (decoded.includes(':')) [method, password] = decoded.split(/:(.*)/s);
@@ -924,6 +1036,7 @@ async function cleanupTunNetworking() {
   const ip = ipBinary();
   const shell = shellBinary();
   const cleanup = [
+    `details=$(${ip} -details link show nixvpn0 2>/dev/null || true); case "$details" in *"alias NixVPN"*) ;; *) exit 6 ;; esac`,
     `${ip} rule del pref 9020 2>/dev/null || true`,
     `${ip} -6 rule del pref 9020 2>/dev/null || true`,
     `${ip} route flush table 20220 2>/dev/null || true`,
@@ -937,6 +1050,12 @@ async function cleanupTunNetworking() {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (fs.existsSync('/sys/class/net/nixvpn0')) throw new Error('TUN interface nixvpn0 is still active after cleanup');
+}
+
+async function markTunNetworking(configPath) {
+  const helper = tunHelperBinary();
+  if (!helper) return;
+  await runCommand('pkexec', [helper, 'mark', configPath]);
 }
 
 async function removeStaleTunInterface() {
@@ -965,7 +1084,7 @@ function coreConfig(server, mode, proxyPort) {
 async function startProxyCore(server, mode) {
   const proxyPort = mode === 'TUN' ? null : await findAvailablePort(state.settings.proxyPort);
   const needsAdmin = mode !== 'Proxy';
-  if (needsAdmin && fs.existsSync('/sys/class/net/nixvpn0')) {
+  if (needsAdmin && await tunRoutingNeedsCleanup()) {
     await removeStaleTunInterface();
   }
   if (proxyPort && proxyPort !== Number(state.settings.proxyPort)) {
@@ -979,11 +1098,11 @@ async function startProxyCore(server, mode) {
     let config;
     try { config = coreConfig(server, mode, proxyPort); } catch (error) { reject(error); return; }
     const configPath = path.join(app.getPath('userData'), 'runtime-config.json');
+    if (needsAdmin && !isLinux) { reject(new Error('TUN is supported on Linux only')); return; }
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
     coreConfigPath = configPath;
     coreUsesPrivilege = needsAdmin;
     const binary = singBoxBinary();
-    if (needsAdmin && !isLinux) { reject(new Error('TUN is supported on Linux only')); return; }
     const supervisor = needsAdmin && tunSupervisorBinary();
     const command = needsAdmin ? 'pkexec' : binary;
     const args = needsAdmin
@@ -994,11 +1113,17 @@ async function startProxyCore(server, mode) {
     let settled = false;
     let runtimeFailed = false;
     let lastError = '';
+    const clearFailedStart = () => {
+      try { fs.unlinkSync(configPath); } catch {}
+      if (coreConfigPath === configPath) coreConfigPath = null;
+      coreUsesPrivilege = false;
+    };
     const fail = (error) => {
       if (settled) return;
       settled = true;
       if (coreProcess === child) coreProcess = null;
       signalCoreProcess(child, 'SIGTERM');
+      clearFailedStart();
       reject(error);
     };
     const runtimeFailure = (error) => {
@@ -1042,7 +1167,8 @@ async function startProxyCore(server, mode) {
         }
       }
     });
-    waitForCoreReady(child, mode, proxyPort).then(() => {
+    waitForCoreReady(child, mode, proxyPort).then(async () => {
+      if (needsAdmin) await markTunNetworking(configPath);
       if (!settled) { settled = true; resolve(); }
     }).catch(fail);
   });
@@ -1118,10 +1244,14 @@ async function stopProxyCore() {
 }
 
 async function stopCoreCompletely() {
+  const configPath = coreConfigPath;
   let stopError;
   try { await stopProxyCore(); } catch (error) { stopError = error; }
   try { await terminateOrphanedCore(); }
   finally {
+    if (configPath) {
+      try { fs.unlinkSync(configPath); } catch {}
+    }
     coreConfigPath = null;
     coreUsesPrivilege = false;
   }
@@ -1175,9 +1305,11 @@ function sendSupervisorCommand(child, command) {
     }
     let output = '';
     let settled = false;
+    const timeout = setTimeout(() => finish(new Error('TUN supervisor did not acknowledge the command')), 10000);
     const finish = (error) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timeout);
       child.stdout.off('data', onData);
       child.off('close', onClose);
       child.stdin.off('error', onError);
@@ -1225,7 +1357,7 @@ async function recoverConnectionAfterFailure(failedChild) {
     const refreshed = state.profiles.find((item) => item.id === profile.id);
     const candidates = (refreshed?.servers || []).filter((server) => server.host);
     if (!candidates.length) throw new Error('The updated subscription has no available servers');
-    const reachable = candidates.filter((server) => Number.isFinite(Number(server.ping)));
+    const reachable = candidates.filter((server) => server.ping != null && Number.isFinite(Number(server.ping)));
     const best = (reachable.length ? reachable : candidates).reduce((winner, server) => {
       if (!winner) return server;
       if (!reachable.length) return winner;
@@ -1484,9 +1616,57 @@ async function addSubscription(rawSourceURL) {
   return state;
 }
 
-async function updateSubscription(profileId, { measurePings = false } = {}) {
+function serverIdentity(server) {
+  return `${String(server?.host || '').toLowerCase()}:${Number(server?.port) || 443}:${String(server?.protocol || '').toLowerCase()}`;
+}
+
+async function reconcileActiveConnectionAfterUpdate(profileId, previousActiveServer) {
+  if (!previousActiveServer || state.connection !== 'Connected') return;
+  const profile = state.profiles.find((item) => item.id === profileId);
+  if (!profile) return;
+  const replacement = profile.servers.find((server) => serverIdentity(server) === serverIdentity(previousActiveServer));
+  if (!replacement) {
+    try { await disconnectConnection(); }
+    catch (error) { log('error', 'Connection cleanup after subscription update failed', removeSecretsFromError(error)); }
+    state.activeServerId = null;
+    state.connection = 'Disconnected';
+    state.connectionStartedAt = null;
+    writeState();
+    log('warning', 'Active server disappeared after subscription update', 'The VPN was disconnected for safety');
+    return;
+  }
+
+  const mode = state.mode;
+  state.activeServerId = replacement.id;
+  state.connection = 'Disconnected';
+  state.connectionStartedAt = null;
+  writeState();
+  try {
+    await stopCoreCompletely();
+    await restoreKDEProxy();
+    await cleanupTunNetworking();
+    await connectCoreForServer(replacement, mode);
+    state.connection = 'Connected';
+    state.connectionStartedAt = Date.now();
+    writeState();
+    log('success', `Active connection refreshed on ${replacement.name}`, `${replacement.protocol} · ${replacement.host}`);
+  } catch (error) {
+    try { await stopCoreCompletely(); } catch {}
+    try { await cleanupTunNetworking(); } catch {}
+    try { await restoreKDEProxy(); } catch {}
+    state.connection = 'Disconnected';
+    state.connectionStartedAt = null;
+    writeState();
+    log('error', 'Active connection refresh failed', removeSecretsFromError(error));
+  }
+}
+
+async function updateSubscriptionInternal(profileId, { measurePings = false } = {}) {
   const current = state.profiles.find((profile) => profile.id === profileId);
   if (!current) throw new Error('Profile was not found');
+  const previousActiveServer = state.connection === 'Connected'
+    ? current.servers.find((server) => server.id === state.activeServerId)
+    : null;
   let text = current.sourceURL;
   let headers;
   if (/^https?:\/\//i.test(current.sourceURL)) ({ text, headers } = await fetchSubscription(current.sourceURL));
@@ -1495,7 +1675,15 @@ async function updateSubscription(profileId, { measurePings = false } = {}) {
   }
   const servers = parseSubscription(text, current.sourceURL);
   if (!servers.length) throw new Error('No supported servers were found during update');
-  const located = await enrichProfileCountries({ ...current, servers: servers.map((server) => normalizeServer(server, current.sourceURL)) });
+  const previousServers = new Map(current.servers.map((server) => [serverIdentity(server), server]));
+  const normalizedServers = servers.map((server) => {
+    const normalized = normalizeServer(server, current.sourceURL);
+    const previous = previousServers.get(serverIdentity(normalized));
+    return previous && normalized.ping == null
+      ? { ...normalized, ping: previous.ping, pingSource: previous.pingSource }
+      : normalized;
+  });
+  const located = await enrichProfileCountries({ ...current, servers: normalizedServers });
   const next = measurePings ? await measureProfilePings(located) : located;
   const latest = state.profiles.find((profile) => profile.id === profileId) || current;
   state.profiles = state.profiles.map((profile) => profile.id === profileId ? {
@@ -1507,7 +1695,13 @@ async function updateSubscription(profileId, { measurePings = false } = {}) {
   } : profile);
   writeState();
   log('success', `Updated profile “${current.name}”`, `${servers.length} servers detected`);
+  await reconcileActiveConnectionAfterUpdate(profileId, previousActiveServer);
+  mainWindow?.webContents.send('state:changed', state);
   return state;
+}
+
+function updateSubscription(profileId, options = {}) {
+  return serializeConnectionOperation(() => updateSubscriptionInternal(profileId, options));
 }
 
 async function checkAllPings() {
@@ -1557,18 +1751,24 @@ function registerIPC() {
     log('info', `Renamed profile to “${profile.name}”`);
     return state;
   });
-  ipcMain.handle('profiles:remove', (_event, profileId) => {
-    state.profiles = state.profiles.filter((profile) => profile.id !== profileId);
+  ipcMain.handle('profiles:remove', (_event, profileId) => serializeConnectionOperation(async () => {
+    const profile = state.profiles.find((item) => item.id === profileId);
+    if (!profile) throw new Error('Profile was not found');
+    const removesActiveServer = profile.servers.some((server) => server.id === state.activeServerId);
+    if (removesActiveServer && state.connection === 'Connected') {
+      await disconnectConnection();
+    }
+    state.profiles = state.profiles.filter((item) => item.id !== profileId);
     if (state.activeServerId && !state.profiles.some((profile) => profile.servers.some((server) => server.id === state.activeServerId))) state.activeServerId = null;
     writeState();
     log('info', 'Profile removed');
     return state;
-  });
+  }));
   ipcMain.handle('servers:ping', async () => {
     try { return await checkAllPings(); }
     catch (error) { log('error', 'Ping check failed', removeSecretsFromError(error)); throw new Error(removeSecretsFromError(error)); }
   });
-  ipcMain.handle('connection:select-server', async (_event, serverId) => {
+  ipcMain.handle('connection:select-server', (_event, serverId) => serializeConnectionOperation(async () => {
     const server = state.profiles.flatMap((profile) => profile.servers).find((item) => item.id === serverId);
     if (!server) throw new Error('Server was not found');
 
@@ -1626,8 +1826,8 @@ function registerIPC() {
     state.activeServerId = serverId;
     writeState();
     return state;
-  });
-  ipcMain.handle('connection:set-mode', (_event, mode) => {
+  }));
+  ipcMain.handle('connection:set-mode', (_event, mode) => serializeConnectionOperation(async () => {
     if (!['Proxy', 'TUN', 'Proxy + TUN'].includes(mode)) throw new Error('Unsupported connection mode');
     if (mode === state.mode) return state;
 
@@ -1669,7 +1869,7 @@ function registerIPC() {
     writeState();
     log('info', `Connection mode changed to ${mode}`);
     return state;
-  });
+  }));
   ipcMain.handle('settings:update', (_event, patch) => {
     const next = { ...state.settings, ...(patch || {}) };
     const proxyPort = Number(next.proxyPort);
@@ -1695,7 +1895,7 @@ function registerIPC() {
     log('info', 'Settings updated');
     return state;
   });
-  ipcMain.handle('connection:toggle', async () => {
+  ipcMain.handle('connection:toggle', () => serializeConnectionOperation(async () => {
     if (state.connection === 'Connected') {
       return disconnectConnection();
     }
@@ -1714,7 +1914,7 @@ function registerIPC() {
     writeState();
     log('success', `Connected to ${server.name}`, `${server.protocol} · ${server.host}`);
     return state;
-  });
+  }));
   ipcMain.handle('logs:clear', () => { state.logs = []; writeState(); return state; });
 }
 

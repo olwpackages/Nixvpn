@@ -258,7 +258,17 @@ function bindPageEvents() {
     $('#rename-profile-input').focus();
     $('#rename-profile-input').select();
   }));
-  document.querySelectorAll('.remove-profile').forEach((button) => button.addEventListener('click', async () => { if (confirm('Are you sure you want to delete this subscription?')) { appState = await window.nixvpn.removeProfile(button.dataset.profileId); render(); } }));
+  document.querySelectorAll('.remove-profile').forEach((button) => button.addEventListener('click', async () => {
+    if (!confirm('Are you sure you want to delete this subscription?')) return;
+    setBusy(button, true, '');
+    try {
+      appState = await window.nixvpn.removeProfile(button.dataset.profileId);
+      render();
+    } catch (error) {
+      alert(error.message);
+      setBusy(button, false, '');
+    }
+  }));
   $('#clear-logs')?.addEventListener('click', async () => { appState = await window.nixvpn.clearLogs(); render(); });
   $('#save-settings')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;

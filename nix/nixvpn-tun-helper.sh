@@ -8,11 +8,28 @@ tr_binary="@trBinary@"
 caller_uid="${PKEXEC_UID:-}"
 
 cleanup() {
+  link_details=$($ip_binary -details link show nixvpn0 2>/dev/null || true)
+  case "$link_details" in
+    *"alias NixVPN"*) ;;
+    *) exit 6 ;;
+  esac
   "$ip_binary" rule del pref 9020 2>/dev/null || true
   "$ip_binary" -6 rule del pref 9020 2>/dev/null || true
   "$ip_binary" route flush table 20220 2>/dev/null || true
   "$ip_binary" -6 route flush table 20220 2>/dev/null || true
   "$ip_binary" link delete nixvpn0 2>/dev/null || true
+}
+
+mark_tun() {
+  config_path="$1"
+  case "$config_path" in
+    */runtime-config.json) ;;
+    *) exit 2 ;;
+  esac
+  [ -n "$caller_uid" ] || exit 3
+  [ -f "$config_path" ] || exit 4
+  [ "$($stat_binary -c '%u' "$config_path")" = "$caller_uid" ] || exit 5
+  "$ip_binary" link set dev nixvpn0 alias NixVPN
 }
 
 stop_core() {
@@ -51,6 +68,10 @@ case "${1:-}" in
   cleanup)
     [ "$#" -eq 1 ] || exit 2
     cleanup
+    ;;
+  mark)
+    [ "$#" -eq 2 ] || exit 2
+    mark_tun "$2"
     ;;
   stop-core)
     [ "$#" -eq 2 ] || exit 2
