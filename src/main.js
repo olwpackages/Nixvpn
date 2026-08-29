@@ -353,6 +353,21 @@ function log(level, message, detail = '') {
   }
 }
 
+function publicState() {
+  const { clientHwid, ...safeState } = state;
+  return {
+    ...safeState,
+    profiles: state.profiles.map((profile) => ({
+      ...profile,
+      servers: profile.servers.map(({ source, outbound, ...server }) => server)
+    }))
+  };
+}
+
+function sendStateChanged() {
+  mainWindow?.webContents.send('state:changed', publicState());
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1220,
@@ -427,12 +442,14 @@ const countryCodes = {
   китай: 'cn', монголия: 'mn', казахстан: 'kz', киргизия: 'kg', узбекистан: 'uz'
 };
 
+const normalizedCountryEntries = Object.entries(countryCodes)
+  .sort(([left], [right]) => right.length - left.length)
+  .map(([key, code]) => [key.toLowerCase().replace(/[^a-zа-я0-9]+/g, ' ').trim(), code]);
+
 function countryFromName(name, host = '') {
   const haystack = `${name} ${host}`.toLowerCase().replace(/[^a-zа-я0-9]+/g, ' ').trim();
   const paddedHaystack = ` ${haystack} `;
-  const entries = Object.entries(countryCodes).sort(([left], [right]) => right.length - left.length);
-  for (const [key, code] of entries) {
-    const normalizedKey = key.toLowerCase().replace(/[^a-zа-я0-9]+/g, ' ').trim();
+  for (const [normalizedKey, code] of normalizedCountryEntries) {
     if (normalizedKey && paddedHaystack.includes(` ${normalizedKey} `)) return code;
   }
   const tld = host.toLowerCase().split('.').pop();
@@ -715,7 +732,7 @@ const pingTargets = [
 ];
 const pingSamples = 3;
 const pingRequestTimeout = 4500;
-const pingConcurrency = 4;
+const pingConcurrency = 2;
 const monotonicMilliseconds = () => Number(process.hrtime.bigint()) / 1e6;
 
 async function reservePingPort() {
@@ -1011,16 +1028,11 @@ async function terminateOrphanedCore() {
 
 async function tunRoutingNeedsCleanup() {
   if (!isLinux) return false;
-  if (fs.existsSync('/sys/class/net/nixvpn0')) return true;
+  if (!fs.existsSync('/sys/class/net/nixvpn0')) return false;
   try {
-    const values = await Promise.all([
-      commandOutput(ipBinary(), ['rule', 'show']),
-      commandOutput(ipBinary(), ['-6', 'rule', 'show']),
-      commandOutput(ipBinary(), ['route', 'show', 'table', '20220']),
-      commandOutput(ipBinary(), ['-6', 'route', 'show', 'table', '20220'])
-    ]);
-    return values.some((value) => /9020|20220|nixvpn0/.test(value));
-  } catch { return true; }
+    const details = await commandOutput(ipBinary(), ['-details', 'link', 'show', 'nixvpn0']);
+    return /alias NixVPN/.test(details);
+  } catch { return false; }
 }
 
 async function cleanupTunNetworking() {
@@ -1036,7 +1048,7 @@ async function cleanupTunNetworking() {
   const ip = ipBinary();
   const shell = shellBinary();
   const cleanup = [
-    `details=$(${ip} -details link show nixvpn0 2>/dev/null || true); case "$details" in *"alias NixVPN"*) ;; *) exit 6 ;; esac`,
+    `details=$(${ip} -details link show nixvpn0 2>/dev/null || true); case "$details" in *"alias NixVPN"*) ;; *) exit 0 ;; esac`,
     `${ip} rule del pref 9020 2>/dev/null || true`,
     `${ip} -6 rule del pref 9020 2>/dev/null || true`,
     `${ip} route flush table 20220 2>/dev/null || true`,
@@ -1136,7 +1148,7 @@ async function startProxyCore(server, mode) {
       state.connectionStartedAt = null;
       writeState();
       log('error', 'sing-box stopped unexpectedly', error.message);
-      mainWindow?.webContents.send('state:changed', state);
+      sendStateChanged();
       void recoverConnectionAfterFailure(child);
     };
     child.stdout.on('data', (chunk) => log('info', 'sing-box', String(chunk).trim().slice(-600)));
@@ -1375,13 +1387,13 @@ async function recoverConnectionAfterFailure(failedChild) {
     state.connectionStartedAt = Date.now();
     writeState();
     log('success', `Connection recovered on ${best.name}`, `${best.ping == null ? 'Ping unavailable' : `${best.ping} ms`} · ${best.protocol}`);
-    mainWindow?.webContents.send('state:changed', state);
+    sendStateChanged();
   } catch (error) {
     state.connection = 'Disconnected';
     state.connectionStartedAt = null;
     writeState();
     log('error', 'Automatic recovery failed', removeSecretsFromError(error));
-    mainWindow?.webContents.send('state:changed', state);
+    sendStateChanged();
   } finally {
     recoveryInProgress = false;
   }
@@ -1529,7 +1541,7 @@ function schedulePingChecks() {
     if (!state.profiles.length) return;
     try {
       await checkAllPings();
-      mainWindow?.webContents.send('state:changed', state);
+      sendStateChanged();
     } catch (error) {
       log('error', 'Scheduled ping check failed', removeSecretsFromError(error));
     }
@@ -1571,7 +1583,7 @@ async function measureProfileInBackground(profileId) {
       ? { ...located, name: latest.name, customName: Boolean(latest.customName), sourceURL: latest.sourceURL, expiresAt: latest.expiresAt, updatedAt: latest.updatedAt }
       : profile);
     writeState();
-    mainWindow?.webContents.send('state:changed', state);
+    sendStateChanged();
   } catch (error) {
     log('warning', 'Background server location refresh failed', removeSecretsFromError(error));
   }
@@ -1584,7 +1596,7 @@ async function refreshSavedServerCountries() {
   if (!changed) return;
   state.profiles = profiles;
   writeState();
-  mainWindow?.webContents.send('state:changed', state);
+  sendStateChanged();
 }
 
 async function addSubscription(rawSourceURL) {
@@ -1696,7 +1708,7 @@ async function updateSubscriptionInternal(profileId, { measurePings = false } = 
   writeState();
   log('success', `Updated profile “${current.name}”`, `${servers.length} servers detected`);
   await reconcileActiveConnectionAfterUpdate(profileId, previousActiveServer);
-  mainWindow?.webContents.send('state:changed', state);
+  sendStateChanged();
   return state;
 }
 
@@ -1724,7 +1736,7 @@ function removeSecretsFromError(error) {
 }
 
 function registerIPC() {
-  ipcMain.handle('state:get', () => state);
+  ipcMain.handle('state:get', () => publicState());
   ipcMain.handle('window:minimize', () => mainWindow?.minimize());
   ipcMain.handle('window:close', () => mainWindow?.close());
   ipcMain.handle('clipboard:write', (_event, value) => {
@@ -1732,11 +1744,11 @@ function registerIPC() {
     return true;
   });
   ipcMain.handle('profiles:add', async (_event, sourceURL) => {
-    try { return await addSubscription(String(sourceURL || '').trim()); }
+    try { await addSubscription(String(sourceURL || '').trim()); return publicState(); }
     catch (error) { log('error', 'Subscription import failed', removeSecretsFromError(error)); throw new Error(removeSecretsFromError(error)); }
   });
   ipcMain.handle('profiles:update', async (_event, profileId) => {
-    try { return await updateSubscription(profileId); }
+    try { await updateSubscription(profileId); return publicState(); }
     catch (error) { log('error', 'Subscription update failed', removeSecretsFromError(error)); throw new Error(removeSecretsFromError(error)); }
   });
   ipcMain.handle('profiles:rename', (_event, profileId, name) => {
@@ -1749,7 +1761,7 @@ function registerIPC() {
     profile.customName = true;
     writeState();
     log('info', `Renamed profile to “${profile.name}”`);
-    return state;
+    return publicState();
   });
   ipcMain.handle('profiles:remove', (_event, profileId) => serializeConnectionOperation(async () => {
     const profile = state.profiles.find((item) => item.id === profileId);
@@ -1762,10 +1774,10 @@ function registerIPC() {
     if (state.activeServerId && !state.profiles.some((profile) => profile.servers.some((server) => server.id === state.activeServerId))) state.activeServerId = null;
     writeState();
     log('info', 'Profile removed');
-    return state;
+    return publicState();
   }));
   ipcMain.handle('servers:ping', async () => {
-    try { return await checkAllPings(); }
+    try { await checkAllPings(); return publicState(); }
     catch (error) { log('error', 'Ping check failed', removeSecretsFromError(error)); throw new Error(removeSecretsFromError(error)); }
   });
   ipcMain.handle('connection:select-server', (_event, serverId) => serializeConnectionOperation(async () => {
@@ -1780,7 +1792,7 @@ function registerIPC() {
           state.connectionStartedAt = Date.now();
           writeState();
           log('success', `Switched to ${server.name}`, `${server.protocol} · ${server.host}`);
-          return state;
+          return publicState();
         } catch (error) {
           try { await stopCoreCompletely(); } catch {}
           try { await cleanupTunNetworking(); } catch {}
@@ -1790,7 +1802,7 @@ function registerIPC() {
           state.connectionStartedAt = null;
           writeState();
           log('error', 'Server switch failed', removeSecretsFromError(error));
-          mainWindow?.webContents.send('state:changed', state);
+          sendStateChanged();
           throw new Error(removeSecretsFromError(error));
         }
       }
@@ -1808,7 +1820,7 @@ function registerIPC() {
         state.connectionStartedAt = Date.now();
         writeState();
         log('success', `Switched to ${server.name}`, `${server.protocol} · ${server.host}`);
-        return state;
+        return publicState();
       } catch (error) {
         try { await stopCoreCompletely(); } catch {}
         try { await cleanupTunNetworking(); } catch {}
@@ -1818,18 +1830,18 @@ function registerIPC() {
         state.connectionStartedAt = null;
         writeState();
         log('error', 'Server switch failed', removeSecretsFromError(error));
-        mainWindow?.webContents.send('state:changed', state);
+        sendStateChanged();
         throw new Error(removeSecretsFromError(error));
       }
     }
 
     state.activeServerId = serverId;
     writeState();
-    return state;
+    return publicState();
   }));
   ipcMain.handle('connection:set-mode', (_event, mode) => serializeConnectionOperation(async () => {
     if (!['Proxy', 'TUN', 'Proxy + TUN'].includes(mode)) throw new Error('Unsupported connection mode');
-    if (mode === state.mode) return state;
+    if (mode === state.mode) return publicState();
 
     if (state.connection === 'Connected') {
       return (async () => {
@@ -1849,7 +1861,7 @@ function registerIPC() {
           state.connectionStartedAt = Date.now();
           writeState();
           log('success', `Connection mode changed to ${mode}`, `Reconnected to ${server.name}`);
-          return state;
+          return publicState();
         } catch (error) {
           try { await stopCoreCompletely(); } catch {}
           try { await cleanupTunNetworking(); } catch {}
@@ -1859,7 +1871,7 @@ function registerIPC() {
           state.connectionStartedAt = null;
           writeState();
           log('error', 'Connection mode change failed', removeSecretsFromError(error));
-          mainWindow?.webContents.send('state:changed', state);
+          sendStateChanged();
           throw new Error(removeSecretsFromError(error));
         }
       })();
@@ -1868,7 +1880,7 @@ function registerIPC() {
     state.mode = mode;
     writeState();
     log('info', `Connection mode changed to ${mode}`);
-    return state;
+    return publicState();
   }));
   ipcMain.handle('settings:update', (_event, patch) => {
     const next = { ...state.settings, ...(patch || {}) };
@@ -1893,11 +1905,12 @@ function registerIPC() {
     scheduleSubscriptionUpdates();
     schedulePingChecks();
     log('info', 'Settings updated');
-    return state;
+    return publicState();
   });
   ipcMain.handle('connection:toggle', () => serializeConnectionOperation(async () => {
     if (state.connection === 'Connected') {
-      return disconnectConnection();
+      await disconnectConnection();
+      return publicState();
     }
     const server = state.profiles.flatMap((profile) => profile.servers).find((item) => item.id === state.activeServerId) || state.profiles[0]?.servers[0];
     if (!server) { log('error', 'Connection failed', 'Add a profile and select a server first'); throw new Error('Add a profile and select a server first'); }
@@ -1913,9 +1926,9 @@ function registerIPC() {
     state.connectionStartedAt = Date.now();
     writeState();
     log('success', `Connected to ${server.name}`, `${server.protocol} · ${server.host}`);
-    return state;
+    return publicState();
   }));
-  ipcMain.handle('logs:clear', () => { state.logs = []; writeState(); return state; });
+  ipcMain.handle('logs:clear', () => { state.logs = []; writeState(); return publicState(); });
 }
 
 app.whenReady().then(() => {

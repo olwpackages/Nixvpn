@@ -11,13 +11,30 @@ const logLevel = (value) => String(value || 'info').trim().toLowerCase();
 const flag = (country) => /^[a-z]{2}$/.test(country || '') && country !== 'un'
   ? `<span class="flag-frame"><img class="flag" loading="eager" decoding="async" data-country="${escapeHTML(country)}" src="https://flagcdn.com/${country}.svg" alt="${escapeHTML(country)} flag"></span>`
   : '<span class="flag flag-unknown" aria-label="Unknown location">🌐</span>';
-const allServers = () => appState.profiles.flatMap((profile) => (profile.servers || []).map((server) => ({ ...server, profileName: profile.name })));
+const allServers = () => appState.profiles.flatMap((profile) => profile.servers || []);
 const pingClass = (value) => value == null ? '' : value < 100 ? 'good' : value < 220 ? 'medium' : 'bad';
 const pingText = (value) => {
   if (value == null) return '—';
   if (value >= 1000) return `${(value / 1000).toFixed(2).replace(/\.00$/, '').replace(/0$/, '')} s`;
   const precise = value < 10 ? value.toFixed(2).replace(/\.?0+$/, '') : String(Math.round(value));
   return `${precise} ms`;
+};
+const pingPresentation = (server) => {
+  const pingTitle = server.pingSource === 'proxy'
+    ? 'Latency measured through the VPN tunnel'
+    : server.pingSource === 'tcp'
+      ? 'Tunnel probe unavailable; showing direct TCP latency'
+      : server.pingSource === 'timeout'
+        ? 'The VPN server did not respond to the tunnel probe'
+        : 'Latency unavailable';
+  const pingLabel = server.pingSource === 'proxy'
+    ? pingText(server.ping)
+    : server.pingSource === 'tcp'
+      ? `TCP ${pingText(server.ping)}`
+      : server.pingSource === 'timeout'
+        ? 'Timeout'
+        : pingText(server.ping);
+  return { pingTitle, pingLabel };
 };
 const durationText = (milliseconds) => {
   const totalSeconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
@@ -103,20 +120,7 @@ function bindConnectionStickerFallback() {
 
 function serverCard(server) {
   const name = cleanLocationName(server.name);
-  const pingTitle = server.pingSource === 'proxy'
-    ? 'Latency measured through the VPN tunnel'
-    : server.pingSource === 'tcp'
-      ? 'Tunnel probe unavailable; showing direct TCP latency'
-      : server.pingSource === 'timeout'
-        ? 'The VPN server did not respond to the tunnel probe'
-      : 'Latency unavailable';
-  const pingLabel = server.pingSource === 'proxy'
-    ? pingText(server.ping)
-    : server.pingSource === 'tcp'
-      ? `TCP ${pingText(server.ping)}`
-      : server.pingSource === 'timeout'
-        ? 'Timeout'
-      : pingText(server.ping);
+  const { pingTitle, pingLabel } = pingPresentation(server);
   return `<article class="server-card ${server.id === appState.activeServerId ? 'is-active' : ''}" data-server-id="${escapeHTML(server.id)}">
     <div class="server-card-top"><div class="server-name">${flag(server.country)}<div><strong title="${escapeHTML(name)}">${escapeHTML(name)}</strong><small>${escapeHTML(server.host)}:${escapeHTML(server.port)}</small></div></div><div class="ping ${pingClass(server.ping)}" title="${pingTitle}">${pingLabel}</div></div>
   </article>`;
@@ -220,6 +224,52 @@ function scheduleRender() {
   });
 }
 
+const renderStateKey = (value) => [
+  value.mode,
+  value.connection,
+  value.connectionStartedAt,
+  value.activeServerId,
+  value.runtimeProxyPort,
+  ...(value.profiles || []).flatMap((profile) => [
+    profile.id,
+    profile.name,
+    profile.sourceURL,
+    profile.expiresAt,
+    profile.updatedAt,
+    ...(profile.servers || []).flatMap((server) => [
+      server.id,
+      server.name,
+      server.host,
+      server.port,
+      server.protocol,
+      server.country
+    ])
+  ])
+].join('\u0001');
+
+function updateDynamicValues() {
+  const servers = new Map(allServers().map((server) => [server.id, server]));
+  document.querySelectorAll('.server-card').forEach((card) => {
+    const server = servers.get(card.dataset.serverId);
+    if (!server) return;
+    const ping = card.querySelector('.ping');
+    if (ping) {
+      const { pingTitle, pingLabel } = pingPresentation(server);
+      ping.className = `ping ${pingClass(server.ping)}`;
+      ping.title = pingTitle;
+      ping.textContent = pingLabel;
+    }
+  });
+  syncUptimeTimer();
+}
+
+function applyState(nextState, animate = false) {
+  const shouldPatch = renderStateKey(appState) === renderStateKey(nextState) && Boolean($('#app-content')?.innerHTML);
+  appState = nextState;
+  if (shouldPatch) updateDynamicValues();
+  else render(animate);
+}
+
 function showError(message) { const error = $('#modal-error'); error.textContent = message; error.hidden = false; }
 function setBusy(button, busy, label) {
   if (!button) return;
@@ -246,7 +296,7 @@ function bindPageEvents() {
     source.classList.add('is-copied');
     setTimeout(() => { source.textContent = original; source.classList.remove('is-copied'); }, 1200);
   }));
-  document.querySelectorAll('.update-profile').forEach((button) => button.addEventListener('click', async () => { setBusy(button, true, ''); try { appState = await window.nixvpn.updateProfile(button.dataset.profileId); render(); } catch (error) { alert(error.message); setBusy(button, false, ''); } }));
+  document.querySelectorAll('.update-profile').forEach((button) => button.addEventListener('click', async () => { setBusy(button, true, ''); try { applyState(await window.nixvpn.updateProfile(button.dataset.profileId)); } catch (error) { alert(error.message); setBusy(button, false, ''); } }));
   document.querySelectorAll('.rename-profile').forEach((button) => button.addEventListener('click', async () => {
     const profile = appState.profiles.find((item) => item.id === button.dataset.profileId);
     if (!profile) return;
@@ -262,8 +312,7 @@ function bindPageEvents() {
     if (!confirm('Are you sure you want to delete this subscription?')) return;
     setBusy(button, true, '');
     try {
-      appState = await window.nixvpn.removeProfile(button.dataset.profileId);
-      render();
+      applyState(await window.nixvpn.removeProfile(button.dataset.profileId));
     } catch (error) {
       alert(error.message);
       setBusy(button, false, '');
@@ -289,17 +338,17 @@ function bindPageEvents() {
     } catch (error) { alert(error.message); setBusy(button, false, 'Save settings'); }
   });
   $('#check-pings')?.addEventListener('click', async (event) => {
-    const button = event.currentTarget;
-    setBusy(button, true, 'Check ping');
-    try { appState = await window.nixvpn.checkPings(); render(); }
-    catch (error) { alert(error.message); render(); }
-  });
+  const button = event.currentTarget;
+  setBusy(button, true, 'Check ping');
+  try { applyState(await window.nixvpn.checkPings()); }
+  catch (error) { alert(error.message); render(); }
+  finally { setBusy(button, false, 'Check ping'); }
+});
   document.querySelectorAll('.server-card').forEach((card) => card.addEventListener('click', async (event) => {
-    appState = await window.nixvpn.selectServer(card.dataset.serverId);
-    render();
+    applyState(await window.nixvpn.selectServer(card.dataset.serverId));
   }));
-  $('#mode-select')?.addEventListener('change', async (event) => { try { appState = await window.nixvpn.setMode(event.target.value); render(); } catch (error) { alert(error.message); } });
-  $('#connection-button')?.addEventListener('click', async (event) => { const button = event.currentTarget; setBusy(button, true, 'Connect'); try { appState = await window.nixvpn.toggleConnection(); render(); } catch (error) { alert(error.message); render(); } });
+  $('#mode-select')?.addEventListener('change', async (event) => { try { applyState(await window.nixvpn.setMode(event.target.value)); } catch (error) { alert(error.message); } });
+  $('#connection-button')?.addEventListener('click', async (event) => { const button = event.currentTarget; setBusy(button, true, 'Connect'); try { applyState(await window.nixvpn.toggleConnection()); } catch (error) { alert(error.message); render(); } });
 }
 
 $('#add-profile-form').addEventListener('submit', async (event) => {
@@ -334,7 +383,7 @@ $('#minimize-button').addEventListener('click', () => window.nixvpn.minimize());
 $('#close-button').addEventListener('click', () => window.nixvpn.close());
 document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => { if (currentPage === tab.dataset.page) return; currentPage = tab.dataset.page; render(true); }));
 bindNavigationIconFallbacks();
-window.nixvpn.onStateChanged((nextState) => { appState = nextState; scheduleRender(); });
+window.nixvpn.onStateChanged((nextState) => applyState(nextState));
 window.nixvpn.onLogsChanged((logs) => { appState.logs = logs; if (currentPage === 'logs') scheduleRender(); });
-window.nixvpn.getState().then((nextState) => { appState = nextState; render(); });
+window.nixvpn.getState().then((nextState) => applyState(nextState));
 window.addEventListener('resize', updateTabIndicator);

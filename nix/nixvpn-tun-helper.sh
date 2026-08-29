@@ -11,7 +11,7 @@ cleanup() {
   link_details=$($ip_binary -details link show nixvpn0 2>/dev/null || true)
   case "$link_details" in
     *"alias NixVPN"*) ;;
-    *) exit 6 ;;
+    *) exit 0 ;;
   esac
   "$ip_binary" rule del pref 9020 2>/dev/null || true
   "$ip_binary" -6 rule del pref 9020 2>/dev/null || true

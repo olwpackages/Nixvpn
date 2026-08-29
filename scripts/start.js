@@ -3,7 +3,7 @@ const path = require('node:path');
 
 const electron = path.join(__dirname, '..', 'node_modules', 'electron', 'dist', 'electron');
 const appPath = path.join(__dirname, '..');
-const child = spawn(electron, ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', appPath, ...process.argv.slice(2)], { env: { ...process.env, GSETTINGS_BACKEND: 'memory' }, stdio: 'inherit' });
+const child = spawn(electron, ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', appPath, ...process.argv.slice(2)], { env: { ...process.env }, stdio: 'inherit' });
 
 child.once('error', (error) => {
   console.error(`Could not start local Electron: ${error.message}`);
