@@ -1,4 +1,4 @@
-let appState = { profiles: [], logs: [], mode: 'Proxy', connection: 'Disconnected', connectionStartedAt: null, activeServerId: null };
+let appState = { profiles: [], logs: [], mode: 'Proxy', connection: 'Disconnected', connectionStartedAt: null, activeServerId: null, system: null };
 let currentPage = 'home';
 let uptimeTimer;
 
@@ -129,11 +129,14 @@ function serverCard(server) {
 function renderHome() {
   const servers = allServers();
   const active = servers.find((server) => server.id === appState.activeServerId) || servers[0];
+  const system = appState.system;
+  const systemBanner = system?.needsSetup ? `<section class="setup-banner panel"><div><span class="eyebrow">System setup</span><h2>NixOS integration is incomplete</h2><p>${system.missing?.length ? `Missing: ${escapeHTML(system.missing.join(', '))}.` : 'NixVPN needs permission to configure the system.'} Your configuration will be backed up before rebuilding.</p></div>${system.canSetup ? '<button id="setup-system" class="button primary"><span class="ri-settings-3-line" aria-hidden="true"></span> Configure</button>' : '<span class="muted-label">Manual setup required</span>'}</section>` : '';
+  const tunConflictBanner = system?.tunConflict ? `<section class="setup-banner panel"><div><span class="eyebrow">TUN conflict</span><h2>${escapeHTML(system.tunConflict.name)} TUN is active</h2><p>Disconnect ${escapeHTML(system.tunConflict.name)} before connecting NixVPN in TUN or Proxy + TUN mode. Two full-device tunnels can break Discord, Telegram and other applications.</p></div></section>` : '';
   const profileGroups = appState.profiles.map((profile) => {
     const profileServers = profile.servers || [];
     return `<section class="home-profile-group"><div class="home-profile-heading"><div class="profile-title"><div class="profile-icon ri-links-line" aria-hidden="true"></div><div><span class="eyebrow">Profile</span><h3 title="${escapeHTML(profile.name)}">${escapeHTML(profile.name)}</h3></div></div><span class="muted-label">${profileServers.length} locations</span></div>${profileServers.length ? `<div class="server-cards-grid">${profileServers.map((server) => serverCard(server)).join('')}</div>` : emptyState('ri-server-line', 'No locations', 'This profile has no available servers.')}</section>`;
   }).join('');
-  return `<div class="stat-grid">
+  return `${systemBanner}${tunConflictBanner}<div class="stat-grid">
     <div class="stat-card"><span class="muted-label">Subscriptions</span><span class="stat-value">${appState.profiles.length}</span></div>
     <div class="stat-card"><span class="muted-label">Available servers</span><span class="stat-value">${servers.length}</span></div>
   </div>
@@ -230,6 +233,10 @@ const renderStateKey = (value) => [
   value.connectionStartedAt,
   value.activeServerId,
   value.runtimeProxyPort,
+  value.system?.ready,
+  value.system?.needsSetup,
+  value.system?.tunConflict?.interface,
+  ...(value.system?.missing || []),
   ...(value.profiles || []).flatMap((profile) => [
     profile.id,
     profile.name,
@@ -286,6 +293,13 @@ function setBusy(button, busy, label) {
 
 function bindPageEvents() {
   bindFlagFallbacks();
+  $('#setup-system')?.addEventListener('click', async (event) => {
+    if (!confirm('NixVPN will update the NixOS configuration, create a backup, and run nixos-rebuild. Continue?')) return;
+    const button = event.currentTarget;
+    setBusy(button, true, 'Configure');
+    try { appState = await window.nixvpn.setupSystem(); render(); }
+    catch (error) { alert(error.message); setBusy(button, false, 'Configure'); }
+  });
   $('#open-add-profile')?.addEventListener('click', () => { $('#modal-error').hidden = true; $('#profile-url').value = ''; $('#add-profile-dialog').showModal(); $('#profile-url').focus(); });
   $('#close-add-profile')?.addEventListener('click', () => $('#add-profile-dialog').close());
   $('#cancel-add-profile')?.addEventListener('click', () => $('#add-profile-dialog').close());

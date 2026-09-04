@@ -17,7 +17,7 @@ stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p $out/share/nixvpn $out/bin
-    cp -r src assets package.json $out/share/nixvpn/
+    cp -r src assets package.json nix $out/share/nixvpn/
     mkdir -p $out/libexec
     cp nix/nixvpn-tun-helper.sh $out/libexec/nixvpn-tun-helper
     cp nix/nixvpn-tun-supervisor.sh $out/libexec/nixvpn-tun-supervisor

@@ -18,9 +18,10 @@ in {
     security.polkit.extraConfig = ''
       polkit.addRule(function(action, subject) {
         if (action.id == "org.freedesktop.policykit.exec" &&
-            action.lookup("program") == "${cfg.package}/libexec/nixvpn-tun-helper" &&
+            (action.lookup("program") == "${cfg.package}/libexec/nixvpn-tun-helper" ||
+             action.lookup("program") == "${cfg.package}/libexec/nixvpn-tun-supervisor") &&
             subject.active && subject.local) {
-          return polkit.Result.YES;
+          return polkit.Result.AUTH_ADMIN_KEEP;
         }
       });
     '';

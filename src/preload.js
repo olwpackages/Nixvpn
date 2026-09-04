@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('nixvpn', {
   getState: () => ipcRenderer.invoke('state:get'),
+  setupSystem: () => ipcRenderer.invoke('system:setup'),
   minimize: () => ipcRenderer.invoke('window:minimize'),
   close: () => ipcRenderer.invoke('window:close'),
   copyText: (value) => ipcRenderer.invoke('clipboard:write', value),

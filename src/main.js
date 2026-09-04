@@ -357,6 +357,7 @@ function publicState() {
   const { clientHwid, ...safeState } = state;
   return {
     ...safeState,
+    system: systemDiagnostics(),
     profiles: state.profiles.map((profile) => ({
       ...profile,
       servers: profile.servers.map(({ source, outbound, ...server }) => server)
@@ -978,11 +979,149 @@ function shellBinary() {
   return candidates.find((candidate) => candidate === 'sh' || fs.existsSync(candidate)) || 'sh';
 }
 
+function systemBinary(name) {
+  const candidates = [`/run/current-system/sw/bin/${name}`, `/usr/bin/${name}`, `/bin/${name}`, name];
+  return candidates.find((candidate) => candidate === name || fs.existsSync(candidate)) || name;
+}
+
+function installedNixvpnBinary(name) {
+  const launcher = '/run/current-system/sw/bin/nixvpn';
+  try {
+    const packageRoot = path.dirname(path.dirname(fs.realpathSync(launcher)));
+    const candidate = path.join(packageRoot, 'libexec', name);
+    return fs.existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function nixosConfigPath() {
+  const configured = process.env.NIXOS_CONFIG;
+  const candidates = configured && path.isAbsolute(configured)
+    ? [configured]
+    : ['/etc/nixos/configuration.nix'];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+function nixvpnModulePath() {
+  const candidates = [
+    path.join(app.getAppPath(), 'nix', 'module.nix'),
+    path.join(__dirname, '..', 'nix', 'module.nix')
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+function hasNixvpnModuleImport(config, modulePath) {
+  return Boolean(modulePath && (
+    config.includes(modulePath) ||
+    /(?:nixvpn|NixVpn)[^\"\n]*module\.nix/.test(config) ||
+    /\/nix\/module\.nix/.test(config)
+  ));
+}
+
+function activeTunConflict() {
+  if (!isLinux) return null;
+  if (fs.existsSync('/sys/class/net/throne-tun')) return { name: 'Throne', interface: 'throne-tun' };
+  return null;
+}
+
+function systemDiagnostics() {
+  const nixos = isLinux && (fs.existsSync('/etc/NIXOS') || fs.existsSync('/run/current-system/sw/bin/nixos-version'));
+  const configPath = nixosConfigPath();
+  const modulePath = nixvpnModulePath();
+  let config = '';
+  try { if (configPath) config = fs.readFileSync(configPath, 'utf8'); } catch {}
+  const hasImport = hasNixvpnModuleImport(config, modulePath);
+  const hasEnable = /programs\.nixvpn\.enable\s*=\s*true\s*;/.test(config);
+  const helperPath = tunHelperBinary();
+  const supervisorPath = tunSupervisorBinary();
+  const hasHelper = Boolean(helperPath);
+  const hasSupervisor = Boolean(supervisorPath);
+  const tunConflict = activeTunConflict();
+  let hasSessionSupervisor = false;
+  try { hasSessionSupervisor = Boolean(supervisorPath && fs.readFileSync(supervisorPath, 'utf8').includes('NIXVPN_CORE_PAUSED')); } catch {}
+  const missing = [];
+  if (!configPath) missing.push('NixOS configuration');
+  if (!modulePath) missing.push('NixVPN module');
+  if (configPath && modulePath && !hasImport) missing.push('NixVPN module import');
+  if (configPath && !hasEnable) missing.push('programs.nixvpn.enable');
+  if (!hasHelper || !hasSupervisor) missing.push('installed TUN helpers');
+  if (!hasSessionSupervisor) missing.push('updated TUN supervisor');
+  return {
+    nixos,
+    configPath,
+    modulePath,
+    ready: nixos && hasImport && hasEnable && hasHelper && hasSupervisor && hasSessionSupervisor,
+    needsSetup: nixos && missing.length > 0,
+    canSetup: Boolean(nixos && configPath && modulePath && fs.existsSync('/run/current-system/sw/bin/nixos-rebuild') && fs.existsSync('/run/wrappers/bin/pkexec')),
+    missing,
+    tunConflict
+  };
+}
+
+function prepareNixosConfiguration(source, modulePath) {
+  let next = String(source || '');
+  const moduleImport = JSON.stringify(modulePath);
+  if (!hasNixvpnModuleImport(next, modulePath)) {
+    const imports = /\bimports\s*=\s*\[/m.exec(next);
+    if (imports) {
+      const close = next.indexOf(']', imports.index + imports[0].length);
+      if (close < 0) throw new Error('Could not locate the end of the NixOS imports list');
+      next = `${next.slice(0, close).replace(/\s*$/, '')}\n      ${moduleImport}\n    ${next.slice(close)}`;
+    } else {
+      const open = next.indexOf('{');
+      if (open < 0) throw new Error('Could not locate the NixOS configuration body');
+      next = `${next.slice(0, open + 1)}\n  imports = [\n    ${moduleImport}\n  ];\n${next.slice(open + 1)}`;
+    }
+  }
+  const enable = /programs\.nixvpn\.enable\s*=\s*(?:true|false)\s*;/m;
+  if (enable.test(next)) next = next.replace(enable, 'programs.nixvpn.enable = true;');
+  else {
+    const close = next.lastIndexOf('}');
+    if (close < 0) throw new Error('Could not locate the end of the NixOS configuration');
+    next = `${next.slice(0, close).replace(/\s*$/, '')}\n\n  programs.nixvpn.enable = true;\n${next.slice(close)}`;
+  }
+  return next;
+}
+
+async function setupNixosIntegration() {
+  const diagnostics = systemDiagnostics();
+  if (!diagnostics.nixos) throw new Error('This automatic setup is available only on NixOS');
+  if (!diagnostics.configPath || !diagnostics.modulePath || !diagnostics.canSetup) {
+    throw new Error('NixOS configuration, NixVPN module, or required system tools were not found');
+  }
+  const source = fs.readFileSync(diagnostics.configPath, 'utf8');
+  const prepared = prepareNixosConfiguration(source, diagnostics.modulePath);
+  const candidatePath = path.join(app.getPath('userData'), `configuration.nixvpn-${process.pid}.tmp`);
+  const backupPath = `${diagnostics.configPath}.nixvpn-backup-${Date.now()}`;
+  fs.writeFileSync(candidatePath, prepared, { mode: 0o600 });
+  const shell = shellBinary();
+  const cp = systemBinary('cp');
+  const install = systemBinary('install');
+  const rebuild = systemBinary('nixos-rebuild');
+  const command = [
+    'set -eu',
+    `config=${shellQuote(diagnostics.configPath)}`,
+    `candidate=${shellQuote(candidatePath)}`,
+    `backup=${shellQuote(backupPath)}`,
+    `${shellQuote(cp)} -p -- "$config" "$backup"`,
+    `${shellQuote(install)} -o root -g root -m 0644 -- "$candidate" "$config"`,
+    `if ${shellQuote(rebuild)} switch; then exit 0; else status=$?; ${shellQuote(cp)} -p -- "$backup" "$config"; exit "$status"; fi`
+  ].join('\n');
+  try {
+    await runCommand('pkexec', [shell, '-c', command]);
+  } finally {
+    try { fs.unlinkSync(candidatePath); } catch {}
+  }
+  log('success', 'NixOS integration configured', 'The NixVPN module was enabled and the system was rebuilt');
+  return publicState();
+}
+
 function tunHelperBinary() {
   const configured = process.env.NIXVPN_TUN_HELPER;
   const candidates = configured
     ? [configured]
-    : ['/run/current-system/sw/bin/nixvpn-tun-helper', '/usr/bin/nixvpn-tun-helper'];
+    : [installedNixvpnBinary('nixvpn-tun-helper'), '/run/current-system/sw/bin/nixvpn-tun-helper', '/usr/bin/nixvpn-tun-helper'];
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
 }
 
@@ -990,7 +1129,7 @@ function tunSupervisorBinary() {
   const configured = process.env.NIXVPN_TUN_SUPERVISOR;
   const candidates = configured
     ? [configured]
-    : [path.join(__dirname, '..', 'nix', 'nixvpn-tun-supervisor.sh'), '/run/current-system/sw/bin/nixvpn-tun-supervisor'];
+    : [installedNixvpnBinary('nixvpn-tun-supervisor'), '/run/current-system/sw/bin/nixvpn-tun-supervisor', path.join(__dirname, '..', 'nix', 'nixvpn-tun-supervisor.sh')];
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
 }
 
@@ -1096,6 +1235,23 @@ function coreConfig(server, mode, proxyPort) {
 async function startProxyCore(server, mode) {
   const proxyPort = mode === 'TUN' ? null : await findAvailablePort(state.settings.proxyPort);
   const needsAdmin = mode !== 'Proxy';
+  if (needsAdmin) {
+    const conflict = activeTunConflict();
+    if (conflict) throw new Error(`Another full-device TUN is active (${conflict.name}, ${conflict.interface}). Disconnect it before starting NixVPN TUN.`);
+  }
+  const pausedSupervisor = needsAdmin && coreProcess?.stdin?.writable && coreProcess.__nixvpnPaused && coreConfigPath;
+  if (pausedSupervisor) {
+    const config = coreConfig(server, mode, proxyPort);
+    if (proxyPort) {
+      state.runtimeProxyPort = proxyPort;
+      writeState();
+    }
+    fs.writeFileSync(coreConfigPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+    await sendSupervisorCommand(coreProcess, 'restart');
+    await waitForCoreReady(coreProcess, mode, proxyPort);
+    coreProcess.__nixvpnPaused = false;
+    return;
+  }
   if (needsAdmin && await tunRoutingNeedsCleanup()) {
     await removeStaleTunInterface();
   }
@@ -1255,6 +1411,13 @@ async function stopProxyCore() {
   }
 }
 
+async function pauseSupervisedCore() {
+  const child = coreProcess;
+  if (!child?.stdin?.writable || !coreConfigPath || !coreUsesPrivilege) throw new Error('TUN supervisor is not available');
+  await sendSupervisorCommand(child, 'pause', 'NIXVPN_CORE_PAUSED');
+  child.__nixvpnPaused = true;
+}
+
 async function stopCoreCompletely() {
   const configPath = coreConfigPath;
   let stopError;
@@ -1272,7 +1435,10 @@ async function stopCoreCompletely() {
 
 async function disconnectConnection() {
   const errors = [];
-  try { await stopCoreCompletely(); } catch (error) { errors.push(`Core stop failed: ${error.message}`); }
+  try {
+    if (state.mode !== 'Proxy' && coreProcess?.stdin?.writable) await pauseSupervisedCore();
+    else await stopCoreCompletely();
+  } catch (error) { errors.push(`Core stop failed: ${error.message}`); }
   const hadProxyBackup = Boolean(systemProxyBackup) || fs.existsSync(proxyBackupPath());
   try {
     const restored = await restoreKDEProxy();
@@ -1300,6 +1466,9 @@ async function configureSystemProxyForMode(mode) {
     } catch (error) {
       log('warning', 'System proxy was not configured', error.message);
     }
+  } else {
+    const disabled = await disableKDEProxy();
+    if (!disabled) log('info', 'System proxy is not managed', 'TUN mode routes traffic through the tunnel directly');
   }
 }
 
@@ -1309,7 +1478,7 @@ async function connectCoreForServer(server, mode) {
   await configureSystemProxyForMode(mode);
 }
 
-function sendSupervisorCommand(child, command) {
+function sendSupervisorCommand(child, command, acknowledgement = 'NIXVPN_CORE_RESTARTED') {
   return new Promise((resolve, reject) => {
     if (!child?.stdin?.writable || !child.stdout) {
       reject(new Error('TUN supervisor control channel is unavailable'));
@@ -1330,7 +1499,7 @@ function sendSupervisorCommand(child, command) {
     };
     const onData = (chunk) => {
       output += String(chunk);
-      if (output.includes('NIXVPN_CORE_RESTARTED')) finish();
+      if (output.includes(acknowledgement)) finish();
     };
     const onClose = (code) => finish(new Error(`TUN supervisor exited with code ${code}`));
     const onError = (error) => finish(new Error(`TUN supervisor control failed: ${error.message}`));
@@ -1470,6 +1639,28 @@ async function setKDEProxy(port) {
   await runCommand(kwrite, ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'httpProxy', '127.0.0.1  ' + port]);
   await runCommand(kwrite, ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'httpsProxy', '127.0.0.1  ' + port]);
   await runCommand(kwrite, ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'NoProxy', '<local>']);
+  return true;
+}
+
+async function disableKDEProxy() {
+  const kwrite = ['/run/current-system/sw/bin/kwriteconfig6', '/usr/bin/kwriteconfig6', 'kwriteconfig6'].find((candidate) => candidate === 'kwriteconfig6' || fs.existsSync(candidate));
+  const kread = ['/run/current-system/sw/bin/kreadconfig6', '/usr/bin/kreadconfig6', 'kreadconfig6'].find((candidate) => candidate === 'kreadconfig6' || fs.existsSync(candidate));
+  if (!kwrite || !kread || !String(process.env.XDG_CURRENT_DESKTOP || '').toLowerCase().includes('kde')) return false;
+  if (!systemProxyBackup) {
+    try {
+      systemProxyBackup = {
+        proxyType: await commandOutput(kread, ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'ProxyType']),
+        httpProxy: await commandOutput(kread, ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'httpProxy']),
+        httpsProxy: await commandOutput(kread, ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'httpsProxy']),
+        noProxy: await commandOutput(kread, ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'NoProxy'])
+      };
+      fs.writeFileSync(proxyBackupPath(), JSON.stringify(systemProxyBackup), { mode: 0o600 });
+    } catch (error) {
+      log('error', 'Could not save current system proxy settings', error.message);
+      throw new Error('Could not save current system proxy settings before starting TUN');
+    }
+  }
+  await runCommand(kwrite, ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'ProxyType', '0']);
   return true;
 }
 
@@ -1737,6 +1928,13 @@ function removeSecretsFromError(error) {
 
 function registerIPC() {
   ipcMain.handle('state:get', () => publicState());
+  ipcMain.handle('system:setup', async () => {
+    try { return await setupNixosIntegration(); }
+    catch (error) {
+      log('error', 'NixOS integration setup failed', removeSecretsFromError(error));
+      throw new Error(removeSecretsFromError(error));
+    }
+  });
   ipcMain.handle('window:minimize', () => mainWindow?.minimize());
   ipcMain.handle('window:close', () => mainWindow?.close());
   ipcMain.handle('clipboard:write', (_event, value) => {
@@ -1842,6 +2040,10 @@ function registerIPC() {
   ipcMain.handle('connection:set-mode', (_event, mode) => serializeConnectionOperation(async () => {
     if (!['Proxy', 'TUN', 'Proxy + TUN'].includes(mode)) throw new Error('Unsupported connection mode');
     if (mode === state.mode) return publicState();
+
+    if (state.connection !== 'Connected' && mode === 'Proxy' && coreProcess?.stdin?.writable) {
+      await stopCoreCompletely();
+    }
 
     if (state.connection === 'Connected') {
       return (async () => {

@@ -65,6 +65,16 @@ stop_core() {
   exit 0
 }
 
+pause_core() {
+  if [ -n "$core_pid" ]; then
+    kill -INT "$core_pid" 2>/dev/null || true
+    wait "$core_pid" 2>/dev/null || true
+    core_pid=""
+  fi
+  cleanup
+  printf '%s\n' 'NIXVPN_CORE_PAUSED'
+}
+
 restart_core() {
   if [ -n "$core_pid" ]; then
     kill -INT "$core_pid" 2>/dev/null || true
@@ -74,6 +84,7 @@ restart_core() {
   cleanup
   "$sing_box" run --config "$config_path" &
   core_pid=$!
+  mark_tun
   printf '%s\n' 'NIXVPN_CORE_RESTARTED'
 }
 
@@ -86,6 +97,7 @@ while kill -0 "$core_pid" 2>/dev/null; do
   if read -r -t 1 command; then
     case "$command" in
       stop) stop_core ;;
+      pause) pause_core ;;
       restart) restart_core ;;
     esac
   fi

@@ -61,6 +61,8 @@ h3 { font-size: 15px; }
 .page-content.page-enter { animation: nixvpn-page-enter .16s cubic-bezier(.22,.8,.26,1) both; }
 @keyframes nixvpn-page-enter { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
 .page-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+.setup-banner { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 14px; padding: 18px 21px; border-color: rgba(230,200,117,.28); background: rgba(72,59,24,.22); }
+.setup-banner h2 { margin-top: 4px; font-size: 16px; }.setup-banner p { max-width: 760px; margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .panel { border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 20px 21px 16px; }
 .panel-heading h2 { font-size: 16px; margin: 0; }
