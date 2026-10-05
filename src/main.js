@@ -597,22 +597,23 @@ function parseSubscription(text, fallbackURL) {
     if (/^proxies\s*:/im.test(value)) return parseClashYAML(value);
     return [];
   };
-  let candidates = parseStructured(payload);
-  const encodedPayload = payload.replace(/^base64\s*:\s*/i, '');
-  if (!candidates.length && isProbablyBase64(encodedPayload) && !encodedPayload.includes('://')) {
-    const decoded = decodeBase64(encodedPayload).replace(/^\uFEFF/, '').trim();
-    if (decoded && decoded !== payload) {
-      payload = decoded;
-      candidates = parseStructured(payload);
-    }
-  }
-  if (!candidates.length) {
+  const candidates = [];
+  const visitedPayloads = new Set();
+  for (let depth = 0; depth < 3 && payload && !visitedPayloads.has(payload); depth += 1) {
+    visitedPayloads.add(payload);
+    candidates.push(...parseStructured(payload));
     for (const line of payload.split(/[\r\n]+/)) {
       const trimmed = line.trim().replace(/^[-*]\s+/, '');
       if (!trimmed || /^#/.test(trimmed)) continue;
       const node = parseNode(trimmed);
       if (node) candidates.push(node);
     }
+
+    const encodedPayload = payload.replace(/^base64\s*:\s*/i, '');
+    if (!isProbablyBase64(encodedPayload) || encodedPayload.includes('://')) break;
+    const decoded = decodeBase64(encodedPayload).replace(/^\uFEFF/, '').trim();
+    if (!decoded || decoded === payload) break;
+    payload = decoded;
   }
   const isPlaceholder = (node) => {
     const source = String(node.source || '').toLowerCase();
