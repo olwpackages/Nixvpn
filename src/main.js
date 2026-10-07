@@ -631,6 +631,7 @@ function parseSubscription(text, fallbackURL) {
 }
 
 const maxSubscriptionBytes = 10 * 1024 * 1024;
+const subscriptionRequestTimeoutMs = 30000;
 
 async function readResponseText(response) {
   const contentLength = Number(response.headers.get('content-length'));
@@ -661,7 +662,7 @@ async function readResponseText(response) {
 function fetchText(url, userAgent = 'NixVPN/0.1', includeHwid = false) {
   return new Promise(async (resolve, reject) => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), subscriptionRequestTimeoutMs);
     try {
       const response = await net.fetch(url, {
         redirect: 'follow',
@@ -680,9 +681,18 @@ function fetchText(url, userAgent = 'NixVPN/0.1', includeHwid = false) {
 }
 
 async function fetchSubscription(url) {
-  const first = await fetchText(url);
-  if (first.headers?.get('x-hwid-not-supported')?.toLowerCase() !== 'true') return first;
-
+  let first;
+  try {
+    first = await fetchText(url);
+  } catch (error) {
+    if (!/aborted|aborterror|timed out/i.test(String(error?.name || '') + String(error?.message || ''))) throw error;
+    return fetchText(url, compatibleSubscriptionUserAgent, true);
+  }
+  const contentType = first.headers?.get('content-type')?.toLowerCase() || '';
+  const trimmedText = String(first.text || '').trim().toLowerCase();
+  const isLandingPage = contentType.includes('text/html') || /^<!doctype html|^<html\b/.test(trimmedText);
+  const requiresCompatibleClient = first.headers?.get('x-hwid-not-supported')?.toLowerCase() === 'true';
+  if (!isLandingPage && !requiresCompatibleClient) return first;
   return fetchText(url, compatibleSubscriptionUserAgent, true);
 }
 
