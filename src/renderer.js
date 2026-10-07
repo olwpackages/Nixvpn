@@ -8,9 +8,9 @@ const cleanLocationName = (value) => String(value ?? '').replace(/^(?:[\u{1F1E6}
 const formatDate = (value) => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(value)) : 'No expiry date';
 const formatTime = (value) => value ? new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '—';
 const logLevel = (value) => String(value || 'info').trim().toLowerCase();
-const flag = (country) => /^[a-z]{2}$/.test(country || '') && country !== 'un'
+const flag = (country, name = '') => /^[a-z]{2}$/.test(country || '') && country !== 'un'
   ? `<span class="flag-frame"><img class="flag" loading="eager" decoding="async" data-country="${escapeHTML(country)}" src="https://flagcdn.com/${country}.svg" alt="${escapeHTML(country)} flag"></span>`
-  : '<span class="flag flag-unknown" aria-label="Unknown location">🌐</span>';
+  : `<span class="flag-frame flag-placeholder" role="img" aria-label="${escapeHTML(name || 'Unknown location')}"><span class="${/белые списки|whitelist/i.test(name) ? 'ri-shield-check-line' : 'ri-global-line'}" aria-hidden="true"></span></span>`;
 const allServers = () => appState.profiles.flatMap((profile) => profile.servers || []);
 const pingClass = (value) => value == null ? '' : value < 100 ? 'good' : value < 220 ? 'medium' : 'bad';
 const pingText = (value) => {
@@ -64,11 +64,13 @@ function bindFlagFallbacks() {
   document.querySelectorAll('img.flag').forEach((image) => image.addEventListener('error', () => {
     const code = image.dataset.country || '';
     const fallback = document.createElement('span');
-    fallback.className = 'flag flag-fallback';
-    fallback.textContent = /^[a-z]{2}$/.test(code)
-      ? [...code.toUpperCase()].map((letter) => String.fromCodePoint(127397 + letter.charCodeAt(0))).join('')
-      : '•';
+    fallback.className = 'flag-frame flag-placeholder';
+    fallback.setAttribute('role', 'img');
     fallback.setAttribute('aria-label', `${code || 'Unknown'} flag`);
+    const icon = document.createElement('span');
+    icon.className = 'ri-global-line';
+    icon.setAttribute('aria-hidden', 'true');
+    fallback.append(icon);
     image.closest('.flag-frame')?.replaceWith(fallback);
   }, { once: true }));
 }
@@ -77,15 +79,6 @@ function bindNavigationIconFallbacks() {
   document.querySelectorAll('img.tab-icon-image').forEach((image) => image.addEventListener('error', () => {
     const fallback = document.createElement('span');
     fallback.className = `tab-icon ${image.dataset.fallback || 'ri-shape-line'}`;
-    fallback.setAttribute('aria-hidden', 'true');
-    image.replaceWith(fallback);
-  }, { once: true }));
-}
-
-function bindUptimeIconFallback() {
-  document.querySelectorAll('img.uptime-icon-image').forEach((image) => image.addEventListener('error', () => {
-    const fallback = document.createElement('span');
-    fallback.className = `uptime-icon-fallback ${image.dataset.fallback || 'ri-timer-2-line'}`;
     fallback.setAttribute('aria-hidden', 'true');
     image.replaceWith(fallback);
   }, { once: true }));
@@ -122,7 +115,7 @@ function serverCard(server) {
   const name = cleanLocationName(server.name);
   const { pingTitle, pingLabel } = pingPresentation(server);
   return `<article class="server-card ${server.id === appState.activeServerId ? 'is-active' : ''}" data-server-id="${escapeHTML(server.id)}">
-    <div class="server-card-top"><div class="server-name">${flag(server.country)}<div><strong title="${escapeHTML(name)}">${escapeHTML(name)}</strong><small>${escapeHTML(server.host)}:${escapeHTML(server.port)}</small></div></div><div class="ping ${pingClass(server.ping)}" title="${pingTitle}">${pingLabel}</div></div>
+    <div class="server-card-top"><div class="server-name">${flag(server.country, name)}<div><strong title="${escapeHTML(name)}">${escapeHTML(name)}</strong><small>${escapeHTML(server.host)}:${escapeHTML(server.port)}</small></div></div><div class="ping ${pingClass(server.ping)}" title="${pingTitle}">${pingLabel}</div></div>
   </article>`;
 }
 
@@ -140,7 +133,7 @@ function renderHome() {
     <span class="home-stat"><span>Subscriptions</span><strong>${appState.profiles.length}</strong></span><span class="home-stats-separator" aria-hidden="true">·</span><span class="home-stat"><span>Servers</span><strong>${servers.length}</strong></span>
   </div>
   <div class="page-grid">
-    <section class="connection-panel panel"><img class="connection-sticker" src="../assets/vpn-sticker.svg" alt="" aria-hidden="true"><div class="connection-top"><div class="connection-server-title">${active ? `${flag(active.country)}<strong>${escapeHTML(cleanLocationName(active.name))}</strong>` : '<strong>No server selected</strong>'}</div><select id="mode-select" class="mode-select" aria-label="Connection mode"><option ${appState.mode === 'Proxy' ? 'selected' : ''}>Proxy</option><option ${appState.mode === 'TUN' ? 'selected' : ''}>TUN</option><option ${appState.mode === 'Proxy + TUN' ? 'selected' : ''}>Proxy + TUN</option></select></div><div class="connection-server"><span>${active ? `${escapeHTML(active.country.toUpperCase())} · ${escapeHTML(active.protocol)}` : 'Add a profile to get started'}</span>${appState.mode === 'Proxy' || appState.mode === 'Proxy + TUN' ? `<small>Local proxy port: ${escapeHTML(appState.runtimeProxyPort || appState.settings?.proxyPort || 2080)}</small>` : ''}</div><div class="connection-actions"><button id="connection-button" class="button ${appState.connection === 'Connected' ? 'secondary' : 'primary'}">${appState.connection === 'Connected' ? '<span class="ri-stop-circle-line" aria-hidden="true"></span> Disconnect' : '<span class="ri-play-circle-line" aria-hidden="true"></span> Connect'}</button><div class="uptime-box"><div class="uptime-clock" title="Connection uptime"><img class="uptime-icon-image" data-fallback="ri-timer-2-line" src="https://cdn-icons-png.flaticon.com/512/2421/2421935.png" alt=""></div><div><small>Uptime</small><strong id="uptime-value">00:00:00</strong></div></div></div></section>
+    <section class="connection-panel panel"><img class="connection-sticker" src="../assets/vpn-sticker.svg" alt="" aria-hidden="true"><div class="connection-top"><div class="connection-server-title">${active ? `${flag(active.country, active.name)}<strong>${escapeHTML(cleanLocationName(active.name))}</strong>` : '<strong>No server selected</strong>'}</div><select id="mode-select" class="mode-select" aria-label="Connection mode"><option ${appState.mode === 'Proxy' ? 'selected' : ''}>Proxy</option><option ${appState.mode === 'TUN' ? 'selected' : ''}>TUN</option><option ${appState.mode === 'Proxy + TUN' ? 'selected' : ''}>Proxy + TUN</option></select></div><div class="connection-server"><span>${active ? `${escapeHTML(active.country.toUpperCase())} · ${escapeHTML(active.protocol)}` : 'Add a profile to get started'}</span>${appState.mode === 'Proxy' || appState.mode === 'Proxy + TUN' ? `<small>Local proxy port: ${escapeHTML(appState.runtimeProxyPort || appState.settings?.proxyPort || 2080)}</small>` : ''}</div><div class="connection-actions"><button id="connection-button" class="button connection-toggle ${appState.connection === 'Connected' ? 'is-connected' : 'is-disconnected'}" aria-label="${appState.connection === 'Connected' ? 'Disconnect' : 'Connect'}" title="${appState.connection === 'Connected' ? 'Disconnect' : 'Connect'}"><span class="ri-shut-down-line" aria-hidden="true"></span></button><div class="uptime-box"><small>Uptime</small><strong id="uptime-value">00:00:00</strong></div></div></section>
     <section class="server-list home-server-list"><div class="panel-comment"><img class="available-servers-icon" data-fallback="ri-database-2-line" src="https://cdn-icons-png.flaticon.com/512/8028/8028666.png" alt=""><div><h2>Locations by profile</h2><p>Choose a location from the subscription you want to use.</p></div><div class="panel-comment-actions"><span class="muted-label">${servers.length} total</span><button id="check-pings" class="button secondary"><img class="check-ping-icon" data-fallback="ri-wifi-line" src="https://cdn-icons-png.flaticon.com/512/1176/1176875.png" alt=""> Check ping</button></div></div>${profileGroups || emptyState('ri-server-line', 'No servers yet', 'Add a subscription in Profiles to see available servers.')}</section>
   </div>`;
 }
@@ -159,8 +152,7 @@ function renderLogs() {
 
 function renderSettings() {
   const settings = appState.settings || { proxyPort: 2080, autoStart: false, autoUpdate: false, updateOnLaunch: false, updateIntervalHours: 24, autoRecover: false, pingOnLaunch: false, autoPing: false, pingIntervalHours: 1 };
-  return `<div class="panel-heading settings-heading" style="padding: 4px 0 18px"><div><span class="eyebrow">Application preferences</span><h2>Settings</h2><p>Configure how NixVPN starts and refreshes subscriptions.</p></div></div>
-  <section class="panel settings-panel">
+  return `<section class="panel settings-panel">
     <div class="setting-row"><div><strong>Proxy port</strong><p>Preferred local port for Proxy mode.</p></div><div class="setting-control"><input id="proxy-port" class="number-input" type="number" min="1024" max="65535" value="${escapeHTML(settings.proxyPort)}"><span class="field-hint">If busy, the next free port is selected automatically.</span></div></div>
     <label class="setting-row toggle-row"><div><strong>Start with system</strong><p>Launch NixVPN when you sign in to Linux.</p></div><span class="switch"><input id="auto-start" type="checkbox" ${settings.autoStart ? 'checked' : ''}><span class="switch-track"></span></span></label>
     <label class="setting-row toggle-row"><div><strong>Auto-update subscriptions</strong><p>Refresh saved subscriptions in the background.</p></div><span class="switch"><input id="auto-update" type="checkbox" ${settings.autoUpdate ? 'checked' : ''}><span class="switch-track"></span></span></label>
@@ -180,7 +172,6 @@ function renderView() {
   $('#page-eyebrow').textContent = eyebrow; $('#page-title').textContent = title; $('#app-content').innerHTML = view();
   document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('is-active', tab.dataset.page === currentPage));
   bindPageEvents();
-  bindUptimeIconFallback();
   bindPingIconFallback();
   bindServersIconFallback();
   bindConnectionStickerFallback();
