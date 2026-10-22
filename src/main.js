@@ -15,6 +15,8 @@ let coreProcess;
 let coreConfigPath;
 let coreUsesPrivilege = false;
 let logBroadcastTimer;
+let logPersistenceTimer;
+let pendingLogWrite = false;
 let subscriptionTimer;
 let subscriptionStartupTimer;
 let pingTimer;
@@ -344,12 +346,15 @@ function log(level, message, detail = '') {
     detail
   };
   state.logs = [...state.logs, entry].slice(-500);
-  writeState();
+  pendingLogWrite = true;
   if (!logBroadcastTimer) {
     logBroadcastTimer = setTimeout(() => {
       logBroadcastTimer = null;
       mainWindow?.webContents.send('logs:changed', state.logs);
     }, 80);
+  }
+  if (!logPersistenceTimer) {
+    logPersistenceTimer = setTimeout(flushLogUpdates, 250);
   }
 }
 
@@ -367,6 +372,18 @@ function publicState() {
 
 function sendStateChanged() {
   mainWindow?.webContents.send('state:changed', publicState());
+}
+
+function flushLogUpdates() {
+  if (logPersistenceTimer) clearTimeout(logPersistenceTimer);
+  logPersistenceTimer = null;
+  if (!pendingLogWrite) return;
+  pendingLogWrite = false;
+  try {
+    writeState();
+  } catch (error) {
+    console.error(`[state] Could not persist logs: ${error.message}`);
+  }
 }
 
 function createWindow() {
@@ -2185,6 +2202,9 @@ function gracefulShutdown() {
     catch (error) { if (state) log('error', 'TUN cleanup failed', error.message); }
     try { await stopPingCores(); } catch (error) { if (state) log('warning', 'Ping cleanup failed', error.message); }
     try { await restoreKDEProxy(); } catch (error) { if (state) log('error', 'System proxy restore failed', error.message); }
+    flushLogUpdates();
+    if (logBroadcastTimer) clearTimeout(logBroadcastTimer);
+    logBroadcastTimer = null;
     app.exit(0);
   })();
   return shutdownPromise;

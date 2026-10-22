@@ -9,7 +9,7 @@ const formatDate = (value) => value ? new Intl.DateTimeFormat(undefined, { dateS
 const formatTime = (value) => value ? new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '—';
 const logLevel = (value) => String(value || 'info').trim().toLowerCase();
 const flag = (country, name = '') => /^[a-z]{2}$/.test(country || '') && country !== 'un'
-  ? `<span class="flag-frame"><img class="flag" loading="eager" decoding="async" data-country="${escapeHTML(country)}" src="https://flagcdn.com/${country}.svg" alt="${escapeHTML(country)} flag"></span>`
+  ? `<span class="flag-frame"><img class="flag" loading="lazy" decoding="async" data-country="${escapeHTML(country)}" src="https://flagcdn.com/${country}.svg" alt="${escapeHTML(country)} flag"></span>`
   : `<span class="flag-frame flag-placeholder" role="img" aria-label="${escapeHTML(name || 'Unknown location')}"><span class="${/белые списки|whitelist/i.test(name) ? 'ri-shield-check-line' : 'ri-global-line'}" aria-hidden="true"></span></span>`;
 const allServers = () => appState.profiles.flatMap((profile) => profile.servers || []);
 const pingClass = (value) => value == null ? '' : value < 100 ? 'good' : value < 220 ? 'medium' : 'bad';
